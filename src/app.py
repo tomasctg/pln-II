@@ -44,81 +44,61 @@ def leer_cv_docx(path: str) -> str:
 
 def chunking_semantico_con_llm(texto: str, cliente_groq: Groq, modelo_llm: str) -> List[Dict]:
     """
-    Usa un LLM (Groq) para dividir el CV en chunks semanticos.
-    El LLM entiende la estructura del documento y crea fragmentos
-    coherentes por seccion (experiencia laboral, educacion, skills, etc.)
-
-    A diferencia del chunking naive (por cantidad de caracteres), este
-    metodo produce chunks que respetan los limites semanticos del documento,
-    mejorando significativamente la calidad del retrieval.
-
+    Usa un LLM (Groq con JSON mode) para dividir el CV en chunks semánticos.
+    
+    A diferencia del chunking naive (por cantidad de caracteres), este método produce 
+    chunks que respetan los límites lógicos y semánticos del documento.
+    
     Args:
-        texto: Texto completo del CV
-        cliente_groq: Cliente de Groq
-        modelo_llm: Nombre del modelo a usar
+        texto: Texto completo del CV.
+        cliente_groq: Cliente instanciado de Groq.
+        modelo_llm: Nombre del modelo a utilizar (recomendado llama-3.3-70b-versatile para mejor reasoning).
 
     Returns:
-        Lista de diccionarios con id, texto y seccion de cada chunk
+        List[Dict]: Lista estructurada de chunks.
     """
-    prompt = f"""Eres un experto en procesamiento de documentos. Tu tarea es dividir el siguiente CV 
-en fragmentos (chunks) semanticos para una base de datos vectorial.
+    prompt = f"""Eres un experto en procesamiento de texto para sistemas RAG. 
+Tu tarea es dividir el siguiente Currículum Vitae en fragmentos (chunks) semánticos óptimos para indexación vectorial.
 
-REGLAS ESTRICTAS:
-1. Cada chunk debe ser una unidad tematica coherente (ej: un puesto de trabajo, una seccion de educacion, un proyecto).
-2. Cada chunk debe tener suficiente contexto para ser util por si solo.
-3. Inclui el nombre de la persona en chunks clave para dar contexto.
-4. NO resumas ni modifiques el texto - usa el contenido original tal cual.
-5. Devolve EXACTAMENTE en este formato JSON (sin markdown, sin ```):
+REGLAS DE CHUNKING:
+1. Unidad temática: Cada chunk debe representar un concepto o bloque unitario (ej. un rol laboral específico, la sección completa de educación, un conjunto afín de habilidades).
+2. Autosuficiencia de contexto: Cada chunk debe entenderse por sí mismo. Menciona explícitamente el rol, la empresa o la institución dentro del texto del chunk si es necesario para dar contexto.
+3. Fidelidad: NO inventes ni resumas excesivamente. Mantén la mayor cantidad de detalles del texto original.
+4. Tipo de salida: Tu respuesta DEBE ser un objeto JSON válido con la clave "chunks" que contenga una lista de objetos, cada uno con "seccion" y "texto".
 
-[
-  {{"seccion": "nombre_seccion", "texto": "contenido textual del chunk"}},
-  {{"seccion": "nombre_seccion", "texto": "contenido textual del chunk"}}
-]
+Estructura JSON esperada:
+{{
+  "chunks": [
+    {{"seccion": "experiencia_empresaX", "texto": "contenido descriptivo de la experiencia"}},
+    {{"seccion": "educacion", "texto": "contenido sobre estudios"}}
+  ]
+}}
 
-Secciones posibles: datos_personales, resumen_profesional, experiencia_NOMBRE_EMPRESA, 
-educacion, certificados, habilidades, proyecto_NOMBRE, publicaciones, idiomas
-
-CV A DIVIDIR:
+CV A PROCESAR:
 {texto}
-
-JSON:"""
+"""
 
     respuesta = cliente_groq.chat.completions.create(
         model=modelo_llm,
         messages=[
-            {"role": "system", "content": "Devolves unicamente JSON valido, sin markdown ni texto adicional. "
-                                          "Escapar comillas dobles dentro de los valores con backslash."},
+            {"role": "system", "content": "You are an assistant designed to output strictly valid JSON."},
             {"role": "user", "content": prompt},
         ],
         temperature=0.1,
         max_tokens=4096,
+        response_format={"type": "json_object"}
     )
 
     contenido = respuesta.choices[0].message.content.strip()
 
-    # Limpiar posible markdown wrapping
-    if contenido.startswith("```"):
-        contenido = contenido.split("\n", 1)[1]
-        contenido = contenido.rsplit("```", 1)[0]
-    contenido = contenido.strip()
-
-    # Intentar parsear el JSON; si falla, intentar reparar
-    try:
-        secciones = json.loads(contenido)
-    except json.JSONDecodeError:
-        # Intento de reparacion: extraer objetos con regex
-        import re
-        patron = re.compile(
-            r'\{\s*"seccion"\s*:\s*"([^"]*?)"\s*,\s*"texto"\s*:\s*"(.*?)"\s*\}',
-            re.DOTALL
-        )
-        matches = patron.findall(contenido)
-        if not matches:
-            raise ValueError("No se pudo parsear el JSON del LLM ni extraer secciones con regex.")
-        secciones = [{"seccion": m[0], "texto": m[1]} for m in matches]
+    # Como usamos response_format={"type": "json_object"}, el modelo nos garantiza JSON válido
+    resultado = json.loads(contenido)
+    secciones = resultado.get("chunks", [])
 
     chunks = []
     for idx, sec in enumerate(secciones):
+        if not isinstance(sec, dict) or "texto" not in sec:
+            continue
         chunks.append({
             "id": f"cv_chunk_{idx:03d}",
             "texto": sec["texto"].strip(),
@@ -126,6 +106,9 @@ JSON:"""
             "inicio": 0,
             "fin": len(sec["texto"]),
         })
+
+    if not chunks:
+        raise ValueError("El LLM no generó ningún chunk válido en el JSON.")
 
     return chunks
 
@@ -339,42 +322,6 @@ CONTEXTO DEL CV:
 
 
 # =============================================================================
-# 5. SIMILITUD COSENO MANUAL (PASO 4 DEL EJERCICIO)
-# =============================================================================
-
-def similitud_coseno(vec_a: np.ndarray, vec_b: np.ndarray) -> float:
-    """
-    Calcula la similitud coseno entre dos vectores.
-    cos(theta) = (A . B) / (||A|| x ||B||)
-    """
-    producto_punto = np.dot(vec_a, vec_b)
-    norma_a = np.linalg.norm(vec_a)
-    norma_b = np.linalg.norm(vec_b)
-
-    if norma_a == 0 or norma_b == 0:
-        return 0.0
-
-    return producto_punto / (norma_a * norma_b)
-
-
-def demo_similitud_coseno_local(modelo: SentenceTransformer, chunks: List[Dict], pregunta: str):
-    """
-    Demuestra la busqueda por similitud coseno de forma local (sin Pinecone).
-    Esto es para el paso 4 del ejercicio.
-    """
-    emb_pregunta = modelo.encode(pregunta)
-    emb_chunks = modelo.encode([c["texto"] for c in chunks])
-
-    similitudes = []
-    for i, emb_chunk in enumerate(emb_chunks):
-        sim = similitud_coseno(emb_pregunta, emb_chunk)
-        similitudes.append((i, sim, chunks[i]["texto"]))
-
-    similitudes.sort(key=lambda x: x[1], reverse=True)
-    return similitudes
-
-
-# =============================================================================
 # 6. INTERFAZ STREAMLIT
 # =============================================================================
 
@@ -493,14 +440,6 @@ def main():
             textos_chunks = [c["texto"] for c in chunks]
             embeddings = generar_embeddings(modelo_emb, textos_chunks)
             st.write(f"  {len(embeddings)} embeddings generados (dim={len(embeddings[0])}).")
-
-            # Paso 4: Demo similitud coseno local
-            st.write("Paso 4: Demo de similitud coseno local...")
-            pregunta_demo = "Que experiencia tiene en inteligencia artificial?"
-            similitudes = demo_similitud_coseno_local(modelo_emb, chunks, pregunta_demo)
-            st.write(f"  Pregunta demo: \"{pregunta_demo}\"")
-            for pos, (idx, sim, texto) in enumerate(similitudes[:3]):
-                st.write(f"  {pos+1}. Chunk {idx} - similitud coseno: {sim:.4f}")
 
             # Paso 5: Subir a Pinecone
             st.write("Paso 5: Subiendo vectores a Pinecone...")
