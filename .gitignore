@@ -1,0 +1,29 @@
+# Entorno virtual
+venv/
+.venv/
+
+# Variables de entorno
+.env
+
+# Cache de Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Cache de modelos
+.cache/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Streamlit
+.streamlit/
+
+# Datos sensibles
+*.key
+*.pem
